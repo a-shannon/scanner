@@ -1,0 +1,32 @@
+{
+  "name": "@rosen-bridge/monero-observation-extractor",
+  "version": "0.1.0",
+  "description": "Durable Monero deposit candidate admission for Rosen scanners",
+  "license": "MIT",
+  "author": "A. Shannon",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc --build tsconfig.build.json",
+    "test": "cross-env NODE_OPTIONS=--import=tsx vitest run",
+    "type-check": "tsc --noEmit",
+    "lint:check": "eslint . && prettier --check . --ignore-path ../../../.gitignore"
+  },
+  "dependencies": {
+    "@rosen-bridge/abstract-extractor": "^3.2.3",
+    "@rosen-bridge/abstract-observation-extractor": "^1.0.10",
+    "@rosen-bridge/abstract-scanner": "^2.0.3",
+    "@rosen-bridge/extended-typeorm": "^1.1.0",
+    "@rosen-bridge/scanner-interfaces": "^1.0.0",
+    "blakejs": "^1.2.1"
+  },
+  "engines": {
+    "node": ">=22.18.0",
+    "npm": "11.6.2"
+  }
+}
