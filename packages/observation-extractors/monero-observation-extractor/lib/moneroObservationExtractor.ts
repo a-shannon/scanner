@@ -103,10 +103,13 @@ export class MoneroObservationExtractor<Transaction> extends AbstractExtractor<
     block: BlockInfo,
   ) => {
     if (this.closed) throw Error('Deposit extractor closed');
-    const candidates = transactions.flatMap((transaction) => {
-      const candidate = this.decode(transaction, block);
-      return candidate ? [candidate] : [];
-    });
+    const candidates = [];
+    for (const transaction of transactions) {
+      if (this.closed) throw Error('Deposit extractor closed');
+      const candidate = await this.decode(transaction, block);
+      if (candidate) candidates.push(candidate);
+    }
+    if (this.closed) throw Error('Deposit extractor closed');
     // Errors propagate to the scanner. No cursor success before durable capture.
     await this.store.capture(candidates, block);
     return true;

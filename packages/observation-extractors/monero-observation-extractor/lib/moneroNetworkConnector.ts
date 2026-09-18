@@ -16,7 +16,36 @@ export interface MoneroNetworkOptions {
   fetch?: typeof fetch;
 }
 
+export interface MoneroBlockPacket {
+  blockHex: string;
+  blockHash: string;
+  height: number;
+  miner: MoneroIndexedTransaction;
+  transactions: readonly MoneroIndexedTransaction[];
+}
+
+export interface MoneroIndexedTransaction {
+  txId: string;
+  transactionHex: string;
+  outputIndices: readonly number[];
+}
+
+export interface MoneroOutput {
+  index: number;
+  key: string;
+  mask: string;
+  txId: string;
+  height: number;
+  unlocked: boolean;
+}
+
 type RecordValue = Record<string, unknown>;
+type RpcMethod =
+  | 'get_block'
+  | 'get_info'
+  | 'get_transactions'
+  | 'get_outs'
+  | 'is_key_image_spent';
 const record = (value: unknown): RecordValue => {
   if (!value || typeof value !== 'object' || Array.isArray(value))
     throw Error('Invalid RPC object');
@@ -46,6 +75,13 @@ const bytes = (value: unknown, max: number): string => {
   )
     throw Error('Invalid RPC bytes');
   return value;
+};
+const outputIndices = (value: unknown): number[] => {
+  if (!Array.isArray(value)) throw Error('Invalid output indices');
+  const result = value.map((item) => integer(item));
+  if (new Set(result).size !== result.length)
+    throw Error('Duplicate output indices');
+  return result;
 };
 const agree = <T>(values: T[]): T => {
   if (
@@ -130,7 +166,7 @@ export class MoneroNetworkConnector extends AbstractNetworkConnector<MoneroCandi
 
   private rpc = async (
     endpoint: string,
-    method: string,
+    method: RpcMethod,
     parameters: RecordValue,
   ): Promise<RecordValue> => {
     if (this.closed) throw Error('RPC connector closed');
@@ -139,21 +175,22 @@ export class MoneroNetworkConnector extends AbstractNetworkConnector<MoneroCandi
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const operation = async () => {
-      const jsonRpc = method !== 'get_transactions';
-      const response = await this.fetcher(
-        endpoint + (jsonRpc ? '/json_rpc' : '/get_transactions'),
-        {
-          method: 'POST',
-          redirect: 'error',
-          signal: controller.signal,
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(
-            jsonRpc
-              ? { jsonrpc: '2.0', id: '0', method, params: parameters }
-              : parameters,
-          ),
-        },
-      );
+      const jsonRpc =
+        method !== 'get_transactions' &&
+        method !== 'get_outs' &&
+        method !== 'is_key_image_spent';
+      const path = jsonRpc ? '/json_rpc' : `/${method}`;
+      const response = await this.fetcher(endpoint + path, {
+        method: 'POST',
+        redirect: 'error',
+        signal: controller.signal,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(
+          jsonRpc
+            ? { jsonrpc: '2.0', id: '0', method, params: parameters }
+            : parameters,
+        ),
+      });
       if (controller.signal.aborted) {
         void response.body?.cancel();
         throw Error('RPC timeout');
@@ -356,5 +393,190 @@ export class MoneroNetworkConnector extends AbstractNetworkConnector<MoneroCandi
       )),
     ]);
     return transactions;
+  };
+
+  private readTransactionRows = async (
+    height: number,
+    ids: string[],
+    initialBytes = 0,
+    minerId?: string,
+  ): Promise<MoneroIndexedTransaction[]> => {
+    const rows: MoneroIndexedTransaction[] = [];
+    let totalBytes = initialBytes;
+    if (totalBytes > this.blockByteLimit)
+      throw Error('Block byte limit exceeded');
+    for (let offset = 0; offset < ids.length; offset += this.batchSize) {
+      const wanted = ids.slice(offset, offset + this.batchSize);
+      const peers = await Promise.all(
+        this.endpoints.map(async (endpoint) => {
+          const response = await this.rpc(endpoint, 'get_transactions', {
+            txs_hashes: wanted,
+            decode_as_json: false,
+            prune: false,
+            split: false,
+          });
+          if (
+            response.missed_tx !== undefined &&
+            (!Array.isArray(response.missed_tx) ||
+              response.missed_tx.length !== 0)
+          )
+            throw Error('Missing transaction');
+          if (
+            !Array.isArray(response.txs) ||
+            response.txs.length !== wanted.length
+          )
+            throw Error('Incomplete transaction batch');
+          const byId = new Map<string, MoneroIndexedTransaction>();
+          for (const value of response.txs) {
+            const row = record(value);
+            const txId = hash(row.tx_hash);
+            if (
+              !wanted.includes(txId) ||
+              byId.has(txId) ||
+              row.in_pool !== false ||
+              integer(row.block_height) !== height
+            )
+              throw Error('Invalid transaction anchor');
+            let transactionHex: string;
+            if (row.as_hex !== '') {
+              transactionHex = bytes(row.as_hex, this.responseLimit);
+            } else {
+              if (
+                txId !== minerId ||
+                row.prunable_as_hex !== '' ||
+                typeof row.prunable_hash !== 'string'
+              )
+                throw Error('Invalid split transaction');
+              hash(row.prunable_hash);
+              transactionHex = bytes(row.pruned_as_hex, this.responseLimit);
+            }
+            byId.set(txId, {
+              txId,
+              transactionHex,
+              outputIndices: outputIndices(row.output_indices),
+            });
+          }
+          return wanted.map((id) => byId.get(id)!);
+        }),
+      );
+      const agreed = agree(peers);
+      const batchBytes = agreed.reduce(
+        (sum, tx) => sum + tx.transactionHex.length / 2,
+        0,
+      );
+      totalBytes += batchBytes;
+      if (totalBytes > this.blockByteLimit)
+        throw Error('Block byte limit exceeded');
+      rows.push(...agreed);
+    }
+    return rows;
+  };
+
+  getBlockPacket = async (
+    blockHash: string,
+    height: number,
+  ): Promise<MoneroBlockPacket> => {
+    hash(blockHash);
+    integer(height);
+    await this.checkGenesis();
+    const block = agree(
+      await Promise.all(
+        this.endpoints.map((endpoint) => this.readBlock(endpoint, height)),
+      ),
+    );
+    if (block.hash !== blockHash) throw Error('Source block changed');
+    const minerIds = await Promise.all(
+      this.endpoints.map(async (endpoint) => {
+        const response = await this.rpc(endpoint, 'get_block', { height });
+        return hash(record(response).miner_tx_hash);
+      }),
+    );
+    const minerId = agree(minerIds);
+    const rows = await this.readTransactionRows(
+      height,
+      [minerId, ...block.txIds],
+      block.blob.length / 2,
+      minerId,
+    );
+    if (rows.length !== block.txIds.length + 1 || rows[0].txId !== minerId)
+      throw Error('Invalid block transaction packet');
+    const packet = {
+      blockHex: block.blob,
+      blockHash: block.hash,
+      height,
+      miner: rows[0],
+      transactions: rows.slice(1),
+    };
+    agree([
+      block,
+      ...(await Promise.all(
+        this.endpoints.map((endpoint) => this.readBlock(endpoint, height)),
+      )),
+    ]);
+    const minerIdsAfter = await Promise.all(
+      this.endpoints.map(async (endpoint) => {
+        const response = await this.rpc(endpoint, 'get_block', { height });
+        return hash(record(response).miner_tx_hash);
+      }),
+    );
+    if (agree(minerIdsAfter) !== minerId)
+      throw Error('Source miner transaction changed');
+    const freezeTx = (tx: MoneroIndexedTransaction) =>
+      Object.freeze({
+        ...tx,
+        outputIndices: Object.freeze([...tx.outputIndices]),
+      });
+    return Object.freeze({
+      ...packet,
+      miner: freezeTx(packet.miner),
+      transactions: Object.freeze(packet.transactions.map(freezeTx)),
+    });
+  };
+
+  getOutput = async (globalIndex: number): Promise<MoneroOutput> => {
+    integer(globalIndex);
+    await this.checkGenesis();
+    const peers = await Promise.all(
+      this.endpoints.map(async (endpoint) => {
+        const response = await this.rpc(endpoint, 'get_outs', {
+          outputs: [{ amount: 0, index: globalIndex }],
+          get_txid: true,
+        });
+        if (!Array.isArray(response.outs) || response.outs.length !== 1)
+          throw Error('Invalid output response');
+        const row = record(response.outs[0]);
+        if (typeof row.unlocked !== 'boolean')
+          throw Error('Invalid output unlocked flag');
+        return {
+          index: globalIndex,
+          key: hash(row.key),
+          mask: hash(row.mask),
+          txId: hash(row.txid),
+          height: integer(row.height),
+          unlocked: row.unlocked,
+        };
+      }),
+    );
+    return Object.freeze(agree(peers));
+  };
+
+  getKeyImageStatus = async (image: string): Promise<0 | 1 | 2> => {
+    hash(image);
+    await this.checkGenesis();
+    const peers = await Promise.all(
+      this.endpoints.map(async (endpoint) => {
+        const response = await this.rpc(endpoint, 'is_key_image_spent', {
+          key_images: [image],
+        });
+        if (
+          !Array.isArray(response.spent_status) ||
+          response.spent_status.length !== 1
+        )
+          throw Error('Invalid key image response');
+        const status = integer(response.spent_status[0], 2);
+        return status as 0 | 1 | 2;
+      }),
+    );
+    return agree(peers);
   };
 }

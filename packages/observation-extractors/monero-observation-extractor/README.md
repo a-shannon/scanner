@@ -35,8 +35,10 @@ const outcomes = await extractor.processPending(4);
 The composition must provide these functions:
 
 - `decodeCandidate(transaction, block)` recognizes supported deposit metadata and
-  returns the exact transaction ID and bytes. Malformed recognized deposits must
-  remain diagnosable; an unknown decoding failure must not become silent success.
+  returns the exact transaction ID and bytes, synchronously or asynchronously.
+  It returns `undefined` for transactions outside the supported metadata profile.
+  Native transaction decoding failures must propagate. The complete block is
+  decoded in order before any candidate is captured or the cursor advances.
 - `verifyDeposit(candidate, signal)` reconstructs current authority and returns
   `pending`, independently verified policy `expired`, or `accepted` with the exact
   Rosen observation. It must honor cancellation and impose its own evidence limits.
@@ -73,9 +75,10 @@ concurrency are explicit bounds. An abort-ignoring verifier retains its concurre
 slot until it settles; repeated timeouts cannot multiply background work.
 
 Call `close()` on the extractor and connector before stopping their scheduling.
-They cancel active reads/verifications and reject new work. Finish pending batches
-before closing database connections. A provider ignoring cancellation may require
-its owning process to be terminated.
+They cancel connector reads and admission verifications and reject new work.
+Decoders must impose their own I/O deadlines. Finish pending batches before closing
+database connections. A provider ignoring cancellation may require its owning
+process to be terminated.
 
 The watcher still applies its `observationValidThreshold` to the **original** source
 height. Proofs arriving after that window need an explicit expiry/recovery policy;
@@ -96,10 +99,42 @@ RPC agreement does not verify binary hashes or establish independently administe
 nodes. Native validation and deployment topology remain required. The connector
 contains no wallet RPC, signing or broadcast methods.
 
+`getBlockPacket` adds the miner transaction and global output indices needed by
+the native wallet scanner. It accepts the daemon's split-base representation only
+for the miner; incomplete ordinary transactions are refused. Native verification
+must match that miner byte-for-byte to the serialized block. `getOutput(index)`
+requires all peers to agree on output key, commitment, transaction, height and
+unlock state; `getKeyImageStatus(image)` agrees on unspent, chain-spent or pool-spent.
+Indices are daemon evidence, not commitments in the block hash.
+
+## Native output and certificate replay
+
+`NativeDepositObserver` runs a configured executable's `verify-deposit` command.
+Configure its absolute path, SHA-256, committee manifest, private view key, deadline
+and input/output limits. Each request sends one canonical block packet, a retained
+holder certificate and the selected transaction/output index. The executable is
+checked before and after execution, and cancellation waits for process closure.
+Subprocess diagnostics are not returned to the caller.
+
+The configured manifest binds the network genesis, epoch, ceremony, group key,
+verification shares and authentication identities. Deposit input cannot replace
+that authority. Replay reconstructs the output with view access and verifies the
+holders' key-image association without a spend share. The returned public fields
+include the block anchor, local/global indices, output key, commitment, amount,
+key image and transaction metadata.
+
+This native profile supports a two-of-four committee, one ordinary vault output
+per selected transaction and standard mainnet-format vault addresses. It rejects
+additional timelocks. Its packet limit is 16 MiB; the retained certificate is at
+most 64 KiB, including its embedded selected transaction. Larger deposits or other
+profiles are unsupported and remain unadmitted. Replay alone does not check a
+payment proof, current inclusion, maturity, unspent status or prior credit.
+
 ## Validation
 
 Run `npm run build` and `npm test` in this package. Tests use actual Rosen scanner
-and observation entities with disk SQLite, and mocked daemon responses. Coverage
+and observation entities with disk SQLite, mocked daemon responses and a controlled
+child process for wrapper failure boundaries. Coverage
 includes delayed evidence, fresh-process crash recovery, conflicts, leases,
 rollback during verification, cancellation and resource bounds. They do not claim
 live-chain operation or production deployment qualification.

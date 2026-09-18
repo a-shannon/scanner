@@ -51,7 +51,10 @@ export interface CandidateStoreOptions {
 export type CandidateDecoder<Transaction> = (
   transaction: Transaction,
   block: Readonly<BlockInfo>,
-) => MoneroCandidateInput | undefined;
+) =>
+  | MoneroCandidateInput
+  | undefined
+  | Promise<MoneroCandidateInput | undefined>;
 
 export interface PendingRunResult {
   claimed: number;

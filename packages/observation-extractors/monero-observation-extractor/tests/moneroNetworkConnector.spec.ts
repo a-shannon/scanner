@@ -12,10 +12,12 @@ const setup = () => {
   ) => void = () => {};
   let tip = 4100;
   let blockReads = 0;
+  const urls: string[] = [];
   const fetcher: typeof fetch = async (url, init) => {
+    urls.push(String(url));
     const host = new URL(String(url)).hostname;
     const request = JSON.parse(String(init?.body));
-    const method = request.method ?? 'get_transactions';
+    const method = request.method ?? new URL(String(url)).pathname.slice(1);
     let result: Record<string, unknown> = { status: 'OK', untrusted: false };
     if (method === 'get_info') result.height = tip;
     else if (method === 'get_block') {
@@ -36,6 +38,7 @@ const setup = () => {
           orphan_status: false,
           num_txes: height === 0 ? 0 : 17,
         },
+        miner_tx_hash: hash(9000 + height),
       };
     } else if (method === 'get_transactions') {
       result.txs = request.txs_hashes.map((txId: string) => ({
@@ -43,7 +46,20 @@ const setup = () => {
         as_hex: 'cc' + txId,
         block_height: 4097,
         in_pool: false,
+        output_indices: [1, 2],
       }));
+    } else if (method === 'get_outs') {
+      result.outs = [
+        {
+          key: 'aa'.repeat(32),
+          mask: 'bb'.repeat(32),
+          txid: hash(7000),
+          height: 4097,
+          unlocked: true,
+        },
+      ];
+    } else if (method === 'is_key_image_spent') {
+      result.spent_status = [1];
     } else throw Error('Unexpected RPC');
     mutation(host, method, result);
     return new Response(
@@ -68,6 +84,7 @@ const setup = () => {
       tip++;
     },
     reads: () => blockReads,
+    urls,
   };
 };
 
@@ -220,5 +237,150 @@ describe('Monero daemon agreement connector', () => {
     network.close();
     await expect(pending).rejects.toThrow(/closed/i);
     await expect(network.getCurrentHeight()).rejects.toThrow(/closed/i);
+  });
+  it('returns an agreed bounded block packet with miner and transaction output indices', async () => {
+    const f = setup();
+    const packet = await f
+      .connector({ batchSize: 2 })
+      .getBlockPacket(hash(4098), 4097);
+    expect(packet).toMatchObject({
+      blockHash: hash(4098),
+      height: 4097,
+      miner: { txId: hash(13097) },
+    });
+    expect(packet.transactions).toHaveLength(17);
+    expect(packet.transactions[0].outputIndices).toEqual([1, 2]);
+    expect(Object.isFrozen(packet)).toBe(true);
+    expect(Object.isFrozen(packet.miner.outputIndices)).toBe(true);
+    expect(Object.isFrozen(packet.transactions[0].outputIndices)).toBe(true);
+  });
+  it('accepts the daemon split-base representation only for the miner transaction', async () => {
+    const f = setup();
+    const minerId = hash(13097);
+    const minerBase = 'ab'.repeat(40);
+    f.mutate((_host, method, result) => {
+      if (method !== 'get_transactions') return;
+      const miner = (result.txs as Record<string, unknown>[]).find(
+        (row) => row.tx_hash === minerId,
+      );
+      if (!miner) return;
+      miner.as_hex = '';
+      miner.pruned_as_hex = minerBase;
+      miner.prunable_as_hex = '';
+      miner.prunable_hash = hash(0);
+    });
+    const packet = await f.connector().getBlockPacket(hash(4098), 4097);
+    expect(packet.miner).toMatchObject({
+      txId: minerId,
+      transactionHex: minerBase,
+    });
+  });
+  it('rejects a split-base representation for an ordinary transaction', async () => {
+    const f = setup();
+    f.mutate((_host, method, result) => {
+      if (method !== 'get_transactions') return;
+      const ordinary = (result.txs as Record<string, unknown>[]).find(
+        (row) => row.tx_hash === hash(100),
+      );
+      if (!ordinary) return;
+      ordinary.as_hex = '';
+      ordinary.pruned_as_hex = 'ab'.repeat(40);
+      ordinary.prunable_as_hex = '';
+      ordinary.prunable_hash = hash(0);
+    });
+    await expect(
+      f.connector().getBlockPacket(hash(4098), 4097),
+    ).rejects.toThrow(/Invalid split transaction/);
+  });
+  it('rejects duplicate packet output indices', async () => {
+    const f = setup();
+    f.mutate((_host, method, result) => {
+      if (method === 'get_transactions')
+        (result.txs as Record<string, unknown>[])[0].output_indices = [1, 1];
+    });
+    await expect(
+      f.connector().getBlockPacket(hash(4098), 4097),
+    ).rejects.toThrow(/Duplicate output/);
+  });
+  it('rejects an invalid key image status', async () => {
+    const f = setup();
+    f.mutate((_host, method, result) => {
+      if (method === 'is_key_image_spent') result.spent_status = [3];
+    });
+    await expect(f.connector().getKeyImageStatus(hash(1))).rejects.toThrow();
+  });
+  it('rejects short output keys and masks independently', async () => {
+    for (const field of ['key', 'mask']) {
+      const f = setup();
+      f.mutate((_host, method, result) => {
+        if (method === 'get_outs')
+          (result.outs as Record<string, unknown>[])[0][field] = 'aa';
+      });
+      await expect(f.connector().getOutput(4)).rejects.toThrow();
+    }
+  });
+  it('rejects peer output and spent-status disagreement', async () => {
+    const f = setup();
+    f.mutate((host, method, result) => {
+      if (host === 'node-b.example' && method === 'get_outs')
+        (result.outs as Record<string, unknown>[])[0].txid = hash(7001);
+    });
+    await expect(f.connector().getOutput(4)).rejects.toThrow(/disagree/);
+    const g = setup();
+    g.mutate((host, method, result) => {
+      if (host === 'node-b.example' && method === 'is_key_image_spent')
+        result.spent_status = [2];
+    });
+    await expect(g.connector().getKeyImageStatus(hash(2))).rejects.toThrow(
+      /disagree/,
+    );
+  });
+  it('uses daemon-specific routes for output and key-image RPCs', async () => {
+    const f = setup();
+    await f.connector().getOutput(4);
+    await f.connector().getKeyImageStatus(hash(2));
+    expect(f.urls.some((url) => url.endsWith('/get_outs'))).toBe(true);
+    expect(f.urls.some((url) => url.endsWith('/is_key_image_spent'))).toBe(
+      true,
+    );
+  });
+  it('stops after the first over-budget batch', async () => {
+    const f = setup();
+    let transactionCalls = 0;
+    f.mutate((_host, method, result) => {
+      if (method === 'get_transactions') {
+        transactionCalls++;
+        for (const row of result.txs as Record<string, unknown>[])
+          row.as_hex = 'aa'.repeat(1200);
+      }
+    });
+    await expect(
+      f
+        .connector({ maxBlockBytes: 1024, batchSize: 1 })
+        .getBlockPacket(hash(4098), 4097),
+    ).rejects.toThrow(/Block byte limit/);
+    expect(transactionCalls).toBe(2);
+  });
+  it('rejects an over-budget block before requesting transactions', async () => {
+    const f = setup();
+    let transactionCalls = 0;
+    f.mutate((_host, method, result) => {
+      if (method === 'get_block') result.blob = 'aa'.repeat(1025);
+      if (method === 'get_transactions') transactionCalls++;
+    });
+    await expect(
+      f.connector({ maxBlockBytes: 1024 }).getBlockPacket(hash(4098), 4097),
+    ).rejects.toThrow(/Block byte limit/);
+    expect(transactionCalls).toBe(0);
+  });
+  it('reads one agreed output and key image status through bounded daemon RPCs', async () => {
+    const f = setup();
+    await expect(f.connector().getOutput(4)).resolves.toMatchObject({
+      index: 4,
+      txId: hash(7000),
+      height: 4097,
+      unlocked: true,
+    });
+    await expect(f.connector().getKeyImageStatus(hash(2))).resolves.toBe(1);
   });
 });

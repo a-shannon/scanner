@@ -3,6 +3,7 @@ import { promisify } from 'node:util';
 
 import { ObservationEntity } from '@rosen-bridge/abstract-observation-extractor';
 
+import { MoneroCandidateEntity } from '../lib/entities/moneroCandidateEntity';
 import { MoneroObservationExtractor } from '../lib/moneroObservationExtractor';
 import { AdmissionVerifier, MoneroCandidateInput } from '../lib/types';
 import {
@@ -80,6 +81,61 @@ describe('durable Monero admission through the Rosen scanner', () => {
       [input(2).txId, 2, chain.blocks[2].hash],
     ]);
     expect((await scanner.action.getLastSavedBlock())?.height).toBe(3);
+  });
+
+  it('awaits the decoder and captures only recognized transactions in source order', async () => {
+    const decoded: number[] = [];
+    const ex = new MoneroObservationExtractor<MoneroCandidateInput>(
+      disk.scannerDb,
+      disk.admissionDb,
+      options,
+      async (tx) => {
+        decoded.push(Number(tx.txId.slice(-2)));
+        await new Promise((resolve) => setTimeout(resolve, 2));
+        return tx.txId === input(2).txId ? tx : undefined;
+      },
+      async (candidate) => accepted(candidate),
+    );
+    const chain = chainFixture([[], [input(1), input(2), input(3)]]);
+    const scanner = new TestScanner(
+      'monero',
+      disk.scannerDb,
+      -1,
+      chain.network,
+    );
+    await scanner.registerExtractor(ex);
+    await scanner.update();
+    expect(decoded).toEqual([1, 2, 3]);
+    expect(await ex.processPending(1)).toMatchObject({
+      claimed: 1,
+      accepted: 1,
+    });
+  });
+
+  it('does not capture or advance when a later decoder call fails', async () => {
+    const ex = new MoneroObservationExtractor<MoneroCandidateInput>(
+      disk.scannerDb,
+      disk.admissionDb,
+      options,
+      async (tx) => {
+        if (tx.txId === input(2).txId) throw Error('decoder failed');
+        return tx;
+      },
+      async (candidate) => accepted(candidate),
+    );
+    const chain = chainFixture([[], [input(1), input(2)]]);
+    const scanner = new TestScanner(
+      'monero',
+      disk.scannerDb,
+      -1,
+      chain.network,
+    );
+    await scanner.registerExtractor(ex);
+    await scanner.update();
+    expect(
+      await disk.admissionDb.getRepository(MoneroCandidateEntity).count(),
+    ).toBe(0);
+    expect((await scanner.action.getLastSavedBlock())?.height).toBe(0);
   });
 
   it('keeps a malformed delivery retryable and recovers on a later valid response', async () => {
