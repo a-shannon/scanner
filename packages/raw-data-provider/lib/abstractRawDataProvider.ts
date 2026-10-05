@@ -4,6 +4,7 @@ import {
   ObservationEntity,
 } from '@rosen-bridge/abstract-observation-extractor';
 import { DataSource } from '@rosen-bridge/extended-typeorm';
+import { BlockInfo } from '@rosen-bridge/scanner-interfaces';
 
 import { RawDataProviderStateEntityAction } from './actions/rawDataProviderStateEntityAction';
 import { RawDataProviderStateEntity } from './entities';
@@ -11,6 +12,13 @@ import { RawDataProviderStateEntity } from './entities';
 export abstract class AbstractRawDataProvider<TxType> {
   protected action: RawDataProviderStateEntityAction;
 
+  /**
+   * Creates the state action used to repair observations for one chain.
+   * @param chain - Chain whose observations are replayed.
+   * @param dataSource - Database containing observation and provider state.
+   * @param extractor - Extractor used to replay stored observations.
+   * @param logger - Provider logger; defaults to DummyLogger.
+   */
   constructor(
     protected chain: string,
     protected dataSource: DataSource,
@@ -56,7 +64,7 @@ export abstract class AbstractRawDataProvider<TxType> {
 
   /**
    * Iterates through observations of the current chain and fills their rawData field.
-   * Updates the syncedHeight after each processed observation until the chain is fully synced.
+   * Updates syncedHeight only after the complete extractor group at that height succeeds.
    *
    * @returns void
    */
@@ -95,6 +103,14 @@ export abstract class AbstractRawDataProvider<TxType> {
   protected abstract fetchObservationTxs: (
     observation: ObservationEntity,
   ) => Promise<TxType[] | undefined>;
+
+  /** Default replay preserves the extractor API used by non-EVM providers. */
+  protected replayObservation = (
+    txs: TxType[],
+    observation: ObservationEntity,
+    block: BlockInfo,
+  ): Promise<boolean> => this.extractor.processTransactions(txs, block);
+
   /**
    * Process observation and write rawData
    *
@@ -105,11 +121,30 @@ export abstract class AbstractRawDataProvider<TxType> {
     try {
       const block = { height: observation.height, hash: observation.block };
       const txs = await this.fetchObservationTxs(observation);
-      if (!txs)
+      if (!txs?.length)
         throw new Error(
           `Transaction [${observation.sourceTxId}] not found or invalid response from ${this.chain} chain.`,
         );
-      this.extractor.processTransactions(txs, block);
+      const success = await this.replayObservation(txs, observation, block);
+      if (!success)
+        throw new Error(
+          `Extraction of observation [${observation.sourceTxId}] failed for ${this.chain}.`,
+        );
+      const stored = await this.dataSource
+        .getRepository(ObservationEntity)
+        .findOneBy({ id: observation.id });
+      if (
+        !stored?.rawData ||
+        stored.rawData === 'raw-data extraction is off' ||
+        Object.entries(observation).some(
+          ([field, value]) =>
+            field !== 'rawData' &&
+            stored[field as keyof ObservationEntity] !== value,
+        )
+      )
+        throw new Error(
+          `Observation [${observation.sourceTxId}] was not repaired without changing its stored identity and payload.`,
+        );
     } catch (err) {
       this.logger.error(
         `Processing of observation for ${this.chain} failed: ${err}`,
@@ -128,16 +163,25 @@ export abstract class AbstractRawDataProvider<TxType> {
   protected fillObservationsRawData = async (
     state: RawDataProviderStateEntity,
   ): Promise<RawDataProviderStateEntity> => {
-    const observations = await this.action.fetchChainObservations(
+    const batch = await this.action.fetchChainObservations(
       this.chain,
       state.syncedHeight,
       this.extractor.getId(),
     );
 
-    if (observations.length === 0)
+    if (batch.length === 0)
       throw new Error(
         `ImpossibleBehavior: No more observations found for [${this.chain}] chain`,
       );
+
+    const height = batch[0].height;
+    const observations = await this.action.fetchObservationsAtHeight(
+      this.chain,
+      height,
+      this.extractor.getId(),
+    );
+    if (observations.length === 0)
+      throw new Error(`Observation group at height ${height} disappeared`);
 
     for (const observation of observations) {
       this.logger.debug(
@@ -153,12 +197,14 @@ export abstract class AbstractRawDataProvider<TxType> {
           `RawDataProvider failed to process observation at height ${observation.height} for [${this.chain}] chain`,
         );
       }
-      state.syncedHeight = observation.height;
-      await this.action.store(state);
-      this.logger.debug(
-        `RawDataProvider syncedHeight updated to ${observation.height} for [${this.chain}] chain`,
-      );
     }
+    // Persist only after every row at this height succeeds. A failed group is
+    // retried in full after restart, including rows beyond the batch limit.
+    await this.action.store({ ...state, syncedHeight: height });
+    state.syncedHeight = height;
+    this.logger.debug(
+      `RawDataProvider syncedHeight updated to ${height} for [${this.chain}] chain`,
+    );
     return state;
   };
 }

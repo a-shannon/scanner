@@ -15,6 +15,11 @@ export class RawDataProviderStateEntityAction {
   protected readonly blockRepository: Repository<BlockEntity>;
   protected readonly observationRepository: Repository<ObservationEntity>;
 
+  /**
+   * Retrieves repositories for provider state, blocks and observations.
+   * @param dataSource - Database containing the registered entities.
+   * @param logger - State-action logger; defaults to DummyLogger.
+   */
   constructor(
     protected dataSource: DataSource,
     protected logger: AbstractLogger = new DummyLogger(),
@@ -91,6 +96,17 @@ export class RawDataProviderStateEntityAction {
       take: length,
     });
   };
+
+  /** Fetch the complete extractor group before committing a height cursor. */
+  fetchObservationsAtHeight = async (
+    chain: string,
+    height: number,
+    extractorId: string,
+  ): Promise<ObservationEntity[]> =>
+    this.observationRepository.find({
+      where: { fromChain: chain, height, extractor: extractorId },
+      order: { id: 'ASC' },
+    });
 
   /**
    * return saved block by scannerName & height if exists

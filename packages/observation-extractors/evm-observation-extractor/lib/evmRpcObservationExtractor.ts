@@ -9,16 +9,14 @@ import { BlockInfo } from '@rosen-bridge/scanner-interfaces';
 
 export abstract class EvmRpcObservationExtractor extends AbstractObservationExtractor<TransactionResponse> {
   /**
-   * gets block id and transactions corresponding to the block and saves if they are valid rosen
-   *  transactions and in case of success return true and in case of failure returns false
-   * additionally, it returns false if the transaction is failed
+   * Derives observations from successful Rosen transactions without writing them.
    * @param block
    * @param txs
    */
-  processTransactions = async (
+  extractObservations = async (
     txs: Array<TransactionResponse>,
     block: BlockInfo,
-  ): Promise<boolean> => {
+  ): Promise<ExtractedObservation[]> => {
     const observations: Array<ExtractedObservation> = [];
     for (const transaction of txs) {
       const data = this.extractor.get(transaction);
@@ -57,8 +55,19 @@ export abstract class EvmRpcObservationExtractor extends AbstractObservationExtr
         }
       }
     }
-    return this.actions.storeObservations(observations, block, this.getId());
+    return observations;
   };
+
+  /** Derives and stores observations during normal block ingestion. */
+  processTransactions = async (
+    txs: Array<TransactionResponse>,
+    block: BlockInfo,
+  ): Promise<boolean> =>
+    this.actions.storeObservations(
+      await this.extractObservations(txs, block),
+      block,
+      this.getId(),
+    );
 
   /**
    * gets transaction id from TransactionType
