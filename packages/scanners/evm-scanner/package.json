@@ -29,8 +29,10 @@
   },
   "dependencies": {
     "@rosen-bridge/abstract-scanner": "^4.0.0",
+    "@rosen-bridge/extended-typeorm": "1.1.1",
     "@rosen-bridge/scanner-interfaces": "^1.0.0",
-    "ethers": "6.16.0"
+    "ethers": "6.16.0",
+    "@rosen-bridge/semaphore": "^0.1.0"
   },
   "engines": {
     "node": ">=22.18.0",

@@ -5,6 +5,7 @@ import { ObservationEntity } from '@rosen-bridge/abstract-observation-extractor'
 import { chainValidators, chainDecoders } from '@rosen-bridge/address-codec';
 import { AddressManager } from '@rosen-bridge/address-manager';
 import {
+  AvalancheRpcObservationExtractor,
   BinanceRpcObservationExtractor,
   EthereumRpcObservationExtractor,
 } from '@rosen-bridge/evm-observation-extractor';
@@ -55,6 +56,11 @@ describe('EvmRawDataProvider', () => {
     it.each([
       [EthereumRpcObservationExtractor, 'ethereum', 'ethereum-rpc-extractor'],
       [BinanceRpcObservationExtractor, 'binance', 'binance-rpc-extractor'],
+      [
+        AvalancheRpcObservationExtractor,
+        'avalanche',
+        'avalanche-rpc-extractor',
+      ],
     ])('selects the chain and filter for %s', async (Extractor, chain, id) => {
       const extractor = new Extractor(
         lockAddress,
@@ -108,25 +114,25 @@ describe('EvmRawDataProvider', () => {
 
   describe('fillRawData', () => {
     /**
-     * @target EvmRawDataProvider.fillRawData replays only Ethereum
+     * @target EvmRawDataProvider.fillRawData replays only Avalanche
      * observations with the matching extractor identity
      * @dependencies
      * - SQLite observation and raw-data state repositories.
      * - Real EVM observation extractor, synthetic token map and RPC method
      * spies.
      * @scenario
-     * - Store Ethereum and foreign observations, then replay the matching
+     * - Store Avalanche and foreign observations, then replay the matching
      * block.
      * @expected
-     * - Only the selected Ethereum extractor row and its cursor are repaired.
+     * - Only the selected Avalanche extractor row and its cursor are repaired.
      */
-    it('replays only Ethereum observations with the matching extractor identity', async () => {
-      const extractor = new EthereumRpcObservationExtractor(
+    it('replays only Avalanche observations with the matching extractor identity', async () => {
+      const extractor = new AvalancheRpcObservationExtractor(
         lockAddress,
         dataSource,
-        await createTokenMap(),
+        await createTokenMap('avalanche', 'avax'),
       );
-      const tx = createTransaction();
+      const tx = createTransaction(10, 43114n);
       mockSuccessfulReceipt(tx);
       await extractor.processTransactions([tx], {
         height: 10,
@@ -146,7 +152,7 @@ describe('EvmRawDataProvider', () => {
         {
           ...original,
           id: undefined,
-          extractor: 'other-ethereum-extractor',
+          extractor: 'other-avalanche-extractor',
           rawData: '',
         },
       ]);
@@ -168,11 +174,11 @@ describe('EvmRawDataProvider', () => {
       expect(
         await repository.findOneByOrFail({ id: original.id }),
       ).toMatchObject({
-        fromChain: 'ethereum',
-        extractor: 'ethereum-rpc-extractor',
+        fromChain: 'avalanche',
+        extractor: 'avalanche-rpc-extractor',
         rawData,
         sourceTxId: tx.hash,
-        sourceChainTokenId: 'eth',
+        sourceChainTokenId: 'avax',
       });
       const rows = await repository.find();
       expect(
@@ -181,7 +187,7 @@ describe('EvmRawDataProvider', () => {
       expect(
         await dataSource.getRepository(RawDataProviderStateEntity).find(),
       ).toEqual([
-        expect.objectContaining({ chain: 'ethereum', syncedHeight: 10 }),
+        expect.objectContaining({ chain: 'avalanche', syncedHeight: 10 }),
       ]);
       provider['client'].destroy();
     });
@@ -203,6 +209,7 @@ describe('EvmRawDataProvider', () => {
     it.each([
       [EthereumRpcObservationExtractor, 'ethereum', 'eth', 1n],
       [BinanceRpcObservationExtractor, 'binance', 'bnb', 56n],
+      [AvalancheRpcObservationExtractor, 'avalanche', 'avax', 43114n],
     ])(
       'repairs an exact stored observation for %s',
       async (Extractor, chain, native, chainId) => {

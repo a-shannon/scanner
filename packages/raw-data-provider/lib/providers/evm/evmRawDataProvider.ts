@@ -3,6 +3,7 @@ import { JsonRpcProvider, TransactionResponse } from 'ethers';
 import { AbstractLogger } from '@rosen-bridge/abstract-logger';
 import { ObservationEntity } from '@rosen-bridge/abstract-observation-extractor';
 import {
+  AvalancheRpcObservationExtractor,
   BinanceRpcObservationExtractor,
   EthereumRpcObservationExtractor,
 } from '@rosen-bridge/evm-observation-extractor';
@@ -15,12 +16,12 @@ import { ConnectionByAuthInfoInterface } from '../../types';
 
 export class EvmRawDataProvider extends AbstractRawDataProvider<TransactionResponse> {
   protected client: JsonRpcProvider;
-  protected chain: 'ethereum' | 'binance';
+  protected chain: 'ethereum' | 'binance' | 'avalanche';
 
   /**
    * Selects the supported extractor's chain and creates its RPC provider.
    * @param dataSource - Database containing stored observations and provider state.
-   * @param extractor - Ethereum or Binance observation extractor.
+   * @param extractor - Ethereum, Binance or Avalanche observation extractor.
    * @param evmConnectionInfo - RPC endpoint and optional authentication settings.
    * @param logger - Provider logger.
    */
@@ -28,15 +29,18 @@ export class EvmRawDataProvider extends AbstractRawDataProvider<TransactionRespo
     protected dataSource: DataSource,
     protected extractor:
       | EthereumRpcObservationExtractor
-      | BinanceRpcObservationExtractor,
+      | BinanceRpcObservationExtractor
+      | AvalancheRpcObservationExtractor,
     evmConnectionInfo: ConnectionByAuthInfoInterface,
     protected logger: AbstractLogger,
   ) {
-    let chain: 'ethereum' | 'binance';
+    let chain: 'ethereum' | 'binance' | 'avalanche';
     if (extractor instanceof EthereumRpcObservationExtractor)
       chain = 'ethereum';
     else if (extractor instanceof BinanceRpcObservationExtractor)
       chain = 'binance';
+    else if (extractor instanceof AvalancheRpcObservationExtractor)
+      chain = 'avalanche';
     else throw new Error('Unsupported EVM observation extractor');
     super(chain, dataSource, extractor, logger);
     this.chain = chain;
