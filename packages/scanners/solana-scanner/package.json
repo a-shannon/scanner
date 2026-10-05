@@ -1,0 +1,44 @@
+{
+  "name": "@rosen-bridge/solana-scanner",
+  "version": "0.0.0",
+  "description": "Finalized sparse-block scanner for Solana",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rosen-bridge/scanner.git",
+    "directory": "./packages/scanners/solana-scanner"
+  },
+  "license": "MIT",
+  "author": "A. Shannon",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "tsc --build tsconfig.build.json",
+    "clean": "rimraf dist && rimraf tsconfig.build.tsbuildinfo",
+    "coverage": "npm run test -- --coverage",
+    "lint": "eslint --fix . && npm run prettify",
+    "lint:check": "eslint . && npm run prettify:check",
+    "prettify": "prettier --write . --ignore-path ../../../.gitignore",
+    "prettify:check": "prettier --check . --ignore-path ../../../.gitignore",
+    "release": "npm run test -- --run && npm run clean && npm run build && npm publish --access public",
+    "test": "cross-env NODE_OPTIONS=\"--import tsx\" vitest",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@rosen-bridge/abstract-observation-extractor": "^2.0.0",
+    "@rosen-bridge/abstract-scanner": "^4.0.0",
+    "@rosen-bridge/extended-typeorm": "^1.1.0",
+    "@rosen-bridge/json-bigint": "^1.1.0",
+    "@rosen-bridge/scanner-interfaces": "^1.0.0",
+    "blakejs": "^1.2.1",
+    "bs58": "5.0.0"
+  },
+  "engines": {
+    "node": ">=22.18.0",
+    "npm": "11.6.2"
+  }
+}
