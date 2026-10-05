@@ -1,4 +1,4 @@
-import { JsonRpcProvider, TransactionResponse } from 'ethers';
+import { FetchRequest, JsonRpcProvider, TransactionResponse } from 'ethers';
 
 import {
   AbstractNetworkConnector,
@@ -12,12 +12,11 @@ export class EvmRpcNetwork extends AbstractNetworkConnector<TransactionResponse>
 
   constructor(url: string, timeout?: number, authToken?: string) {
     super();
-    this.provider = authToken
-      ? new JsonRpcProvider(`${url}/${authToken}`)
-      : new JsonRpcProvider(`${url}`);
+    const request = new FetchRequest(authToken ? `${url}/${authToken}` : url);
     if (timeout) {
-      this.provider._getConnection().timeout = timeout;
+      request.timeout = timeout;
     }
+    this.provider = new JsonRpcProvider(request);
   }
 
   /**
