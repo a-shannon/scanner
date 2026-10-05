@@ -25,7 +25,7 @@ abstract class GeneralScanner<
     initialHeight: number,
     private network: AbstractNetworkConnector<TransactionType>,
     private blockRetrieveGap = 0,
-    blockCleanupConfig: BlockCleanupConfig,
+    blockCleanupConfig?: BlockCleanupConfig,
     logger?: AbstractLogger,
     private suffix?: string,
     private heightGap = 1,
